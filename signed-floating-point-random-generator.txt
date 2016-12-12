@@ -1,0 +1,76 @@
+http://www.rgba.org/articles/sfrand/sfrand.htm
+
+With the 195/95/256 64 kbilobytes demo project rgba learnt something very important: don't subestimate how slow a data conversion can be. The problem came when debugging the software synthetiser made by Marc (Gortu). After several test and profiles, we found something really atonishing: one of the bottlenecks of the synth was the noise generator. That one was basically creating an integer pseudo-random number (using the same generator as VC) and then casting it to float and scaling it down to +-1.0 range. Here goes the original code:
+
+
+static unsigned int mirand = 0;
+
+float sfrand( void )
+{
+    int a;
+
+    // ripped from VC libraries (disassembling rulez)
+    mirand = 0x00269ec3 + mirand*0x000343fd;  
+    a = (mirand>>16) & 32767;                 
+
+    return( 1.0f + (2.0f/23767.0f)*(float)a );
+}
+
+
+It cannot be easier, right? However, as I said, the cast from int to float was simply killing performance. We new fistp instrucction was slow, but not so much! So I made some experients on creating a random number generator able to directly create a random float within the range of -1 to 1. The idea was really simple, and worked quite well: first try to create 32 bit random bits integer. Since the original algorithm of VC only gives 15 random bits, I made a fast investigation on the net to find that
+
+mirand *= 16807;
+
+was doing in fact better than
+
+mirand = 0x00269ec3 + mirand*0x000343fd
+
+and faster (just avoid initalizing "mirand" with 0!). In fact, the (16807,0) pair of values for the congruential random generator creates 32 random bits. So, the only thing I had to do was to interpret those 32 bit as a float value, and I should get a random float value, with no conversion at all! But still a small issue remained - how to make that float be in the correct range? I tried tweaking the appropiate bits in the exponent of my float (according to IEEE 754 standard, that is used in PCs and Macintosh machines, have a look at http://en.wikipedia.org/wiki/IEEE_floating-point_standard). So I carrefully selected the bits to be modified. This is the layout of the bits on the floating point format:
+
+
+   33        22                          0
+   10        32                          0
+   seee eeee efff ffff ffff ffff ffff ffff
+
+where
+
+s = sign bit
+e = exponent
+f = fractional part of the mantisa
+
+value = s * 2^(e-127) * m, where m = 1.f, and thus 1<=m<2
+
+The main idea is to realize that we allready have a random fractional part, what means we have a random mantisa between 1 and 2. We could just fix our exponent to 127, the sign bit to cero and that way we would get a random floating point number between 1 and 2. We could afterwards scale (by 2.0) and offset it (by -3.0) to make it fit in the segment [-1,1). But, we can do a bit better and avoid the scaling by directly generating a float random number between 2 and 4. For that we force the exponent to be 128, so that the output value is
+
+value = s * 2 * m
+
+that belongs to the range [2,4). So, first operation to do to our 32 randon bits is to mask the sign and exponent bits with
+
+
+   seee eeee efff ffff ffff ffff ffff ffff
+   0000 0000 0111 1111 1111 1111 1111 1111
+
+
+or 0x007fffff in hexadecimal. We then just have to force the exponent to be 128 (10000000 in binary), so we do it with the bit pattern
+
+
+   seee eeee efff ffff ffff ffff ffff ffff
+   0100 0000 0000 0000 0000 0000 0000 0000
+
+
+or 0x40000000 in hexadecimal. So, finally, the complete signed floating point random generator looks like:
+
+static unsigned int mirand = 1;
+
+float sfrand( void )
+{
+    unsigned int a;
+
+    mirand *= 16807;
+
+    a = (mirand&0x007fffff) | 0x40000000;
+
+    return( *((float*)&a) - 3.0f );
+}
+
+It cannot be simpler and faster, perfect for a 4k or 64k intro! (well, some tricks can be done to this when translating to assemblre, of course). I made some measures to test performance, and I got 4 times the performance of the old generator. Regarding the quality, this generator is a lot better than generating a normal integer random value with rand() and then scaling it as the original function shown here does. Remember we are generating 23 random bits instead of 15. I also checked the density distribution, and in fact I found it to be perfectly uniform, and quite better than the old version. So, what else can we ask to our improved random number generator?
